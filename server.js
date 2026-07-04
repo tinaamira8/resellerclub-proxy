@@ -20,8 +20,13 @@ app.use((req, res, next) => {
   next()
 })
 
-// Health check (no auth needed)
+// Health check and IP reveal (no auth needed)
 app.get('/health', (req, res) => res.json({ ok: true }))
+app.get('/myip', async (req, res) => {
+  const r = await fetch('https://api.ipify.org?format=json')
+  const d = await r.json()
+  res.json(d)
+})
 
 // Forward any request to ResellerClub
 // POST /proxy?path=/domains/available.json
