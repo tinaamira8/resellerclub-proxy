@@ -1,4 +1,5 @@
 import express from 'express'
+import { renderSite, renderComingSoon } from './renderer.js'
 
 const app  = express()
 const PORT = process.env.PORT || 3000
@@ -6,6 +7,37 @@ const PORT = process.env.PORT || 3000
 const RESELLER_ID = process.env.RESELLERCLUB_RESELLER_ID
 const API_KEY     = process.env.RESELLERCLUB_API_KEY
 const PROXY_SECRET = process.env.PROXY_SECRET
+
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+const PLATFORM_HOSTS = ['proxy.launch-domain.com', 'localhost', '66.116.239.55']
+const SITE_SUFFIX = '.launch-domain.com'
+
+async function sbFetch(path) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+  })
+  if (!res.ok) return null
+  return res.json()
+}
+
+// Look up a site by hostname: subdomain of launch-domain.com or a linked custom domain
+async function findSite(host) {
+  host = (host || '').toLowerCase().replace(/^www\./, '').split(':')[0]
+  if (!host || !SUPABASE_URL) return null
+
+  let rows = null
+  if (host.endsWith(SITE_SUFFIX)) {
+    const sub = host.slice(0, -SITE_SUFFIX.length)
+    if (!sub || sub === 'proxy' || sub === 'www') return null
+    rows = await sbFetch(`user_websites?select=name,status,config_json,template_id,website_templates(slug)&subdomain=eq.${encodeURIComponent(sub)}&limit=1`)
+  } else {
+    const domains = await sbFetch(`domains?select=id&domain_name=eq.${encodeURIComponent(host)}&limit=1`)
+    if (!domains?.length) return null
+    rows = await sbFetch(`user_websites?select=name,status,config_json,template_id,website_templates(slug)&domain_id=eq.${domains[0].id}&limit=1`)
+  }
+  return rows?.[0] ?? null
+}
 
 const RC_BASE = 'https://httpapi.com/api'
 
@@ -28,6 +60,37 @@ app.get('/myip', async (req, res) => {
   const r = await fetch('https://api.ipify.org?format=json')
   const d = await r.json()
   res.json(d)
+})
+
+// Caddy on-demand TLS validation: only issue certs for hosts we actually serve
+app.get('/tls-check', async (req, res) => {
+  const domain = (req.query.domain || '').toLowerCase()
+  if (PLATFORM_HOSTS.includes(domain)) return res.status(200).end()
+  const site = await findSite(domain)
+  if (site) return res.status(200).end()
+  return res.status(404).end()
+})
+
+// Serve published sites for any non-platform hostname
+app.use(async (req, res, next) => {
+  const host = (req.headers.host || '').toLowerCase().split(':')[0]
+  if (PLATFORM_HOSTS.includes(host)) return next()
+
+  const site = await findSite(host)
+  if (!site) return res.status(404).send(renderComingSoon('This site'))
+
+  if (site.status !== 'published') {
+    return res.status(200).send(renderComingSoon(site.name))
+  }
+
+  const html = renderSite({
+    config:       site.config_json ?? {},
+    templateSlug: site.website_templates?.slug ?? 'business-clean',
+    siteName:     site.name,
+  })
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.setHeader('Cache-Control', 'public, max-age=60')
+  return res.send(html)
 })
 
 // Verify proxy secret so only our Vercel functions can use this proxy
